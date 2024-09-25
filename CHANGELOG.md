@@ -1,3 +1,17 @@
+# [0.1273.0](https://github.com/lightdash/lightdash/compare/0.1272.0...0.1273.0) (2024-09-25)
+
+
+### Features
+
+* allow setting custom sql on results download ([#11666](https://github.com/lightdash/lightdash/issues/11666)) ([1f75dae](https://github.com/lightdash/lightdash/commit/1f75daef57e63f783b7c628ee069fa3a1cfb60b7))
+
+# [0.1272.0](https://github.com/lightdash/lightdash/compare/0.1271.0...0.1272.0) (2024-09-24)
+
+
+### Features
+
+* allow changing the chart type of each series ([#11648](https://github.com/lightdash/lightdash/issues/11648)) ([340cffe](https://github.com/lightdash/lightdash/commit/340cffeb200c0960133d040b40908f68b0a1e38b))
+
 # [0.1271.0](https://github.com/lightdash/lightdash/compare/0.1270.0...0.1271.0) (2024-09-24)
 
 
