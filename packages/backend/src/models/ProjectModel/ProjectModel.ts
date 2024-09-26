@@ -73,6 +73,7 @@ import {
     InsertChart,
     SavedChartCustomSqlDimensionsTableName,
 } from '../../database/entities/savedCharts';
+import { DbSavedSql, InsertSql } from '../../database/entities/savedSql';
 import { DbSpace } from '../../database/entities/spaces';
 import { DbUser } from '../../database/entities/users';
 import { WarehouseCredentialTableName } from '../../database/entities/warehouseCredentials';
@@ -1333,6 +1334,113 @@ export class ProjectModel {
                           )
                           .returning('*')
                     : [];
+
+            const savedSQLs = await trx('saved_sql')
+                .leftJoin('spaces', 'saved_sql.space_uuid', 'spaces.space_uuid')
+                .whereIn('saved_sql.space_uuid', spaceUuids)
+                .andWhere('spaces.project_uuid', projectUuid)
+                .select<DbSavedSql[]>('saved_sql.*');
+
+            Logger.info(
+                `Duplicating ${savedSQLs.length} SQL queries on ${previewProjectUuid}`,
+            );
+            type CloneSavedSQL = InsertSql;
+
+            const newSavedSQLs =
+                savedSQLs.length > 0
+                    ? await trx('saved_sql')
+                          .insert(
+                              savedSQLs.map((d) => {
+                                  if (!d.space_uuid) {
+                                      throw new Error(
+                                          `Chart ${d.saved_sql_uuid} has no space_uuid`,
+                                      );
+                                  }
+                                  const createSavedSQL: CloneSavedSQL = {
+                                      ...d,
+                                      space_uuid: getNewSpaceUuid(d.space_uuid),
+                                      dashboard_uuid: null,
+                                  };
+                                  return createSavedSQL;
+                              }),
+                          )
+                          .returning('*')
+                    : [];
+
+            const savedSQLInDashboards = await trx('saved_sql')
+                .leftJoin(
+                    'dashboards',
+                    'saved_sql.dashboard_uuid',
+                    'dashboards.dashboard_uuid',
+                )
+                .leftJoin(
+                    'spaces',
+                    'dashboards.space_uuid',
+                    'spaces.space_uuid',
+                )
+                .where('spaces.project_uuid', projectId)
+                .andWhere('saved_sql.space_uuid', null)
+                .select<DbSavedSql[]>('saved_sql.*');
+
+            Logger.info(
+                `Duplicating ${savedSQLInDashboards.length} charts in dashboards on ${previewProjectUuid}`,
+            );
+
+            const newSavedSQLInDashboards =
+                savedSQLs.length > 0
+                    ? await trx('saved_sql')
+                          .insert(
+                              savedSQLs.map((d) => {
+                                  if (!d.dashboard_uuid) {
+                                      throw new Error(
+                                          `Chart ${d.saved_sql_uuid} has no dashboard_uuid`,
+                                      );
+                                  }
+                                  const createSavedSQL: CloneSavedSQL = {
+                                      ...d,
+                                      dashboard_uuid: d.dashboard_uuid,
+                                      space_uuid: null,
+                                  };
+                                  return createSavedSQL;
+                              }),
+                          )
+                          .returning('*')
+                    : [];
+
+            const savedSQLInSpacesMapping = savedSQLs.map((c, i) => ({
+                uuid: c.saved_sql_uuid,
+                newUuid: newSavedSQLs[i].saved_sql_uuid,
+            }));
+            const savedSQLInDashboardsMapping = savedSQLInDashboards.map(
+                (c, i) => ({
+                    uuid: c.saved_sql_uuid,
+                    newUuid: newSavedSQLInDashboards[i].saved_sql_uuid,
+                }),
+            );
+
+            const savedSQLsMapping = [
+                ...savedSQLInSpacesMapping,
+                ...savedSQLInDashboardsMapping,
+            ];
+
+            const savedSQLUuids = savedSQLsMapping.map((c) => c.uuid);
+
+            // only get last saved sql version
+            const lastSavedSQLVersionIds = await trx('saved_sql_versions')
+                .whereIn('saved_sql_uuid', savedSQLUuids)
+                .groupBy('saved_sql_uuid')
+                .max('saved_sql_version_uuid');
+
+            const savedSQLVersions = await trx('saved_sql_versions')
+                .whereIn(
+                    'saved_sql_version_uuid',
+                    lastSavedSQLVersionIds.map((d) => d.max),
+                )
+                .select('*');
+
+            const savedSQLVersionUuids = savedSQLVersions.map(
+                (d) => d.saved_sql_version_uuid,
+            );
 
             const charts = await trx('saved_queries')
                 .leftJoin('spaces', 'saved_queries.space_id', 'spaces.space_id')
