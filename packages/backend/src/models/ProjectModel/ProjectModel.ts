@@ -1405,7 +1405,6 @@ export class ProjectModel {
 
             // Create a mapping of the old saved SQLs to the new saved SQLs
             const savedSQLInDashboards = await trx('saved_sql')
-                .whereNotNull('saved_sql.dashboard_uuid') // where dashboard_uuid is not null
                 .leftJoin(
                     'dashboards',
                     'saved_sql.dashboard_uuid',
@@ -1422,10 +1421,10 @@ export class ProjectModel {
 
             // Create the saved SQLs in the dashboards
             const newSavedSQLInDashboards =
-                savedSQLs.length > 0
+                savedSQLInDashboards.length > 0
                     ? await trx('saved_sql')
                           .insert(
-                              savedSQLs.map((d) => {
+                              savedSQLInDashboards.map((d) => {
                                   console.log('d', d);
                                   if (!d.dashboard_uuid) {
                                       throw new Error(
@@ -1447,6 +1446,7 @@ export class ProjectModel {
                           .returning('*')
                     : [];
 
+            // Create a mapping of the old saved SQLs to the new saved SQLs
             const savedSQLInSpacesMapping = savedSQLs.map((c, i) => ({
                 uuid: c.saved_sql_uuid,
                 newUuid: newSavedSQLs[i].saved_sql_uuid,
@@ -1457,7 +1457,6 @@ export class ProjectModel {
                     newUuid: newSavedSQLInDashboards[i].saved_sql_uuid,
                 }),
             );
-
             const savedSQLMapping = [
                 ...savedSQLInSpacesMapping,
                 ...savedSQLInDashboardsMapping,
@@ -1465,23 +1464,25 @@ export class ProjectModel {
 
             const savedSQLUuids = savedSQLMapping.map((c) => c.uuid);
 
-            // only get last saved sql version
-            const lastSavedSQLVersionIds = await trx('saved_sql_versions')
+            // Get the last saved SQL version by uuid and created_at
+            const lastSavedSQLVersionEntries = await trx('saved_sql_versions')
                 .whereIn('saved_sql_uuid', savedSQLUuids)
-                .groupBy('saved_sql_uuid')
-                .max('saved_sql_version_uuid');
+                .select('saved_sql_uuid')
+                .max('created_at as latest_created_at')
+                .groupBy('saved_sql_uuid');
 
+            // Now query the full records for each saved_sql_uuid where created_at is the latest
             const savedSQLVersions = await trx('saved_sql_versions')
                 .whereIn(
-                    'saved_sql_version_uuid',
-                    lastSavedSQLVersionIds.map((d) => d.max),
+                    'saved_sql_uuid',
+                    lastSavedSQLVersionEntries.map((d) => d.saved_sql_uuid),
                 )
                 .select('*');
 
-            const savedSQLVersionUuids = savedSQLVersions.map(
-                (d) => d.saved_sql_version_uuid,
-            );
-            console.log('here3');
+            // const savedSQLVersionUuids = savedSQLVersions.map(
+            //     (d) => d.saved_sql_version_uuid,
+            // );
+
             const newSavedSQLVersions =
                 savedSQLVersions.length > 0
                     ? await trx('saved_sql_versions')
@@ -1512,70 +1513,45 @@ export class ProjectModel {
                 newUuid: newSavedSQLVersions[i].saved_sql_version_uuid,
             }));
 
-            const copySavedSQLVersionContent = async (
-                table: string,
-                excludedFields: string[],
-                fieldPreprocess: { [field: string]: (value: any) => any } = {},
-            ) => {
-                const content = await trx(table)
-                    .whereIn('saved_sql_version_uuid', savedSQLVersionUuids)
-                    .select(`*`);
+            // const copySavedSQLVersionContent = async (
+            //     table: string,
+            //     excludedFields: string[],
+            //     fieldPreprocess: { [field: string]: (value: any) => any } = {},
+            // ) => {
+            //     const content = await trx(table)
+            //         .whereIn('saved_sql_version_uuid', savedSQLVersionUuids)
+            //         .select(`*`);
 
-                if (content.length === 0) return undefined;
+            //     if (content.length === 0) return undefined;
 
-                const newContent = await trx(table)
-                    .insert(
-                        content.map((d) => {
-                            const createContent = {
-                                ...d,
-                                saved_sql_version_uuid:
-                                    savedSQLVersionMapping.find(
-                                        (m) =>
-                                            m.uuid === d.saved_sql_version_uuid,
-                                    )?.newUuid,
-                            };
-                            excludedFields.forEach((fieldUuid) => {
-                                delete createContent[fieldUuid];
-                            });
-                            Object.keys(fieldPreprocess).forEach(
-                                (fieldUuid) => {
-                                    createContent[fieldUuid] = fieldPreprocess[
-                                        fieldUuid
-                                    ](createContent[fieldUuid]);
-                                },
-                            );
-                            return createContent;
-                        }),
-                    )
-                    .returning('*');
+            //     const newContent = await trx(table)
+            //         .insert(
+            //             content.map((d) => {
+            //                 const createContent = {
+            //                     ...d,
+            //                     saved_sql_version_uuid:
+            //                         savedSQLVersionMapping.find(
+            //                             (m) =>
+            //                                 m.uuid === d.saved_sql_version_uuid,
+            //                         )?.newUuid,
+            //                 };
+            //                 excludedFields.forEach((fieldUuid) => {
+            //                     delete createContent[fieldUuid];
+            //                 });
+            //                 Object.keys(fieldPreprocess).forEach(
+            //                     (fieldUuid) => {
+            //                         createContent[fieldUuid] = fieldPreprocess[
+            //                             fieldUuid
+            //                         ](createContent[fieldUuid]);
+            //                     },
+            //                 );
+            //                 return createContent;
+            //             }),
+            //         )
+            //         .returning('*');
 
-                return newContent;
-            };
-            console.log('here4');
-            await copySavedSQLVersionContent(
-                'saved_queries_version_table_calculations',
-                ['saved_queries_version_table_calculation_id'],
-            );
-            await copySavedSQLVersionContent(
-                'saved_queries_version_custom_dimensions',
-                ['saved_queries_version_custom_dimension_id'],
-                { custom_range: (value: any) => JSON.stringify(value) },
-            );
-            await copySavedSQLVersionContent(
-                SavedChartCustomSqlDimensionsTableName,
-                [],
-            );
-            await copySavedSQLVersionContent('saved_queries_version_sorts', [
-                'saved_queries_version_sort_id',
-            ]);
-            await copySavedSQLVersionContent('saved_queries_version_fields', [
-                'saved_queries_version_field_id',
-            ]);
-            await copySavedSQLVersionContent(
-                'saved_queries_version_additional_metrics',
-                ['saved_queries_version_additional_metric_id', 'uuid'],
-                { filters: (value: any) => JSON.stringify(value) },
-            );
+            //     return newContent;
+            // };
 
             //  dP""b8 88  88    db    88""Yb 888888 .dP"Y8
             // dP   `" 88  88   dPYb   88__dP   88   `Ybo."
