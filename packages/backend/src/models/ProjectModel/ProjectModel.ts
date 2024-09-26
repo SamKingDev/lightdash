@@ -38,7 +38,7 @@ import {
     WarehouseCatalog,
     warehouseClientFromCredentials,
 } from '@lightdash/warehouses';
-import { Knex } from 'knex';
+import knex, { Knex } from 'knex';
 import { omit } from 'lodash';
 import uniqWith from 'lodash/uniqWith';
 import { DatabaseError } from 'pg';
@@ -80,6 +80,7 @@ import { WarehouseCredentialTableName } from '../../database/entities/warehouseC
 import Logger from '../../logging/logger';
 import { wrapSentryTransaction } from '../../utils';
 import { EncryptionUtil } from '../../utils/EncryptionUtil/EncryptionUtil';
+import { generateUniqueSlug } from '../../utils/SlugUtils';
 import { convertExploresToCatalog } from '../CatalogModel/utils';
 import Transaction = Knex.Transaction;
 
@@ -1339,57 +1340,79 @@ export class ProjectModel {
             // `Ybo."   dPYb    Yb  dP  88__    8I  Yb     `Ybo." dP   Yb 88
             // o.`Y8b  dP__Yb    YbdP   88""    8I  dY     o.`Y8b Yb b dP 88  .o
             // 8bodP' dP""""Yb    YP    888888 8888Y"      8bodP'  `"YoYo 88ood8
+
+            // Get all the saved SQLs
             const savedSQLs = await trx('saved_sql')
                 .leftJoin('spaces', 'saved_sql.space_uuid', 'spaces.space_uuid')
                 .whereIn('saved_sql.space_uuid', spaceUuids)
-                .andWhere('spaces.project_uuid', projectUuid)
+                .andWhere('spaces.project_id', projectId)
                 .select<DbSavedSql[]>('saved_sql.*');
 
             Logger.info(
                 `Duplicating ${savedSQLs.length} SQL queries on ${previewProjectUuid}`,
             );
+
+            // Define the type for the new saved SQLs
             type CloneSavedSQL = InsertSql & {
                 saved_sql_uuid?: string;
                 search_vector?: string;
             };
 
-            const newSavedSQLs =
-                savedSQLs.length > 0
-                    ? await trx('saved_sql')
-                          .insert(
-                              savedSQLs.map((d) => {
-                                  if (!d.space_uuid) {
-                                      throw new Error(
-                                          `Chart ${d.saved_sql_uuid} has no space_uuid`,
-                                      );
-                                  }
-                                  const createSavedSQL: CloneSavedSQL = {
-                                      ...d,
-                                      space_uuid: getNewSpaceUuid(d.space_uuid),
-                                      search_vector: undefined,
-                                      saved_sql_uuid: undefined,
-                                      dashboard_uuid: null,
-                                  };
-                                  delete createSavedSQL.search_vector;
-                                  delete createSavedSQL.saved_sql_uuid;
-                                  return createSavedSQL;
-                              }),
-                          )
-                          .returning('*')
-                    : [];
+            // Create a function to create the saved SQLs
+            const createSavedSQLs = async (savedSQLList: DbSavedSql[]) => {
+                if (savedSQLList.length === 0) {
+                    return [];
+                }
+                // Create an array of promises for generating slugs and mapping saved SQLs
+                const mappedSavedSQLsPromises = savedSQLList.map(async (d) => {
+                    if (!d.space_uuid) {
+                        throw new Error(
+                            `Chart ${d.saved_sql_uuid} has no space_uuid`,
+                        );
+                    }
+                    // Generate the slug asynchronously
+                    const uniqueSlug = await generateUniqueSlug(
+                        trx,
+                        'saved_sql',
+                        d.slug, // using the existing slug as a base - preventing naming duplicates
+                    );
+                    // Map the saved SQL to the new saved SQL
+                    const createSavedSQL: CloneSavedSQL = {
+                        ...d,
+                        space_uuid: getNewSpaceUuid(d.space_uuid),
+                        slug: uniqueSlug,
+                        search_vector: undefined,
+                        saved_sql_uuid: undefined,
+                        dashboard_uuid: null,
+                    };
+                    delete createSavedSQL.search_vector;
+                    delete createSavedSQL.saved_sql_uuid;
+                    return createSavedSQL;
+                });
+                // Resolve all promises
+                const mappedSavedSQLs = await Promise.all(
+                    mappedSavedSQLsPromises,
+                );
+                // Insert all the saved SQLs after they have been mapped and return the result
+                const newSavedSQLs = await trx('saved_sql')
+                    .insert(mappedSavedSQLs)
+                    .returning('*');
+                return newSavedSQLs;
+            };
 
+            // Create the saved SQLs
+            const newSavedSQLs = await createSavedSQLs(savedSQLs);
+
+            // Create a mapping of the old saved SQLs to the new saved SQLs
             const savedSQLInDashboards = await trx('saved_sql')
+                .whereNotNull('saved_sql.dashboard_uuid') // where dashboard_uuid is not null
                 .leftJoin(
                     'dashboards',
                     'saved_sql.dashboard_uuid',
                     'dashboards.dashboard_uuid',
                 )
-                .leftJoin(
-                    'spaces',
-                    'dashboards.space_uuid',
-                    'spaces.space_uuid',
-                )
-                .where('spaces.project_uuid', projectUuid)
+                .leftJoin('spaces', 'dashboards.space_id', 'spaces.space_id')
+                .where('spaces.project_id', projectId)
                 .andWhere('saved_sql.space_uuid', null)
                 .select<DbSavedSql[]>('saved_sql.*');
 
@@ -1397,11 +1420,13 @@ export class ProjectModel {
                 `Duplicating ${savedSQLInDashboards.length} charts in dashboards on ${previewProjectUuid}`,
             );
 
+            // Create the saved SQLs in the dashboards
             const newSavedSQLInDashboards =
                 savedSQLs.length > 0
                     ? await trx('saved_sql')
                           .insert(
                               savedSQLs.map((d) => {
+                                  console.log('d', d);
                                   if (!d.dashboard_uuid) {
                                       throw new Error(
                                           `Chart ${d.saved_sql_uuid} has no dashboard_uuid`,
@@ -1433,12 +1458,12 @@ export class ProjectModel {
                 }),
             );
 
-            const savedSQLsMapping = [
+            const savedSQLMapping = [
                 ...savedSQLInSpacesMapping,
                 ...savedSQLInDashboardsMapping,
             ];
 
-            const savedSQLUuids = savedSQLsMapping.map((c) => c.uuid);
+            const savedSQLUuids = savedSQLMapping.map((c) => c.uuid);
 
             // only get last saved sql version
             const lastSavedSQLVersionIds = await trx('saved_sql_versions')
@@ -1456,13 +1481,13 @@ export class ProjectModel {
             const savedSQLVersionUuids = savedSQLVersions.map(
                 (d) => d.saved_sql_version_uuid,
             );
-
+            console.log('here3');
             const newSavedSQLVersions =
                 savedSQLVersions.length > 0
                     ? await trx('saved_sql_versions')
                           .insert(
                               savedSQLVersions.map((d) => {
-                                  const newSavedSQLUuid = savedSQLsMapping.find(
+                                  const newSavedSQLUuid = savedSQLMapping.find(
                                       (m) => m.uuid === d.saved_sql_uuid,
                                   )?.newUuid;
                                   if (!newSavedSQLUuid) {
@@ -1526,7 +1551,7 @@ export class ProjectModel {
 
                 return newContent;
             };
-
+            console.log('here4');
             await copySavedSQLVersionContent(
                 'saved_queries_version_table_calculations',
                 ['saved_queries_version_table_calculation_id'],
@@ -2018,6 +2043,7 @@ export class ProjectModel {
                 spaces: spaceMapping,
                 dashboards: dashboardMapping,
                 dashboardVersions: dashboardVersionsMapping,
+                // savedSql: savedSQLMapping,
             };
             // Insert mapping on database
             await trx('preview_content').insert({
