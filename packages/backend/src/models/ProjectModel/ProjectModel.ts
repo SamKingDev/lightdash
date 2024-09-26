@@ -1425,7 +1425,6 @@ export class ProjectModel {
                     ? await trx('saved_sql')
                           .insert(
                               savedSQLInDashboards.map((d) => {
-                                  console.log('d', d);
                                   if (!d.dashboard_uuid) {
                                       throw new Error(
                                           `Chart ${d.saved_sql_uuid} has no dashboard_uuid`,
