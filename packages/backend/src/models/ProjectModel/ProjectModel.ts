@@ -1335,6 +1335,10 @@ export class ProjectModel {
                           .returning('*')
                     : [];
 
+            // .dP"Y8    db    Yb    dP 888888 8888b.      .dP"Y8  dP"Yb  88
+            // `Ybo."   dPYb    Yb  dP  88__    8I  Yb     `Ybo." dP   Yb 88
+            // o.`Y8b  dP__Yb    YbdP   88""    8I  dY     o.`Y8b Yb b dP 88  .o
+            // 8bodP' dP""""Yb    YP    888888 8888Y"      8bodP'  `"YoYo 88ood8
             const savedSQLs = await trx('saved_sql')
                 .leftJoin('spaces', 'saved_sql.space_uuid', 'spaces.space_uuid')
                 .whereIn('saved_sql.space_uuid', spaceUuids)
@@ -1344,7 +1348,10 @@ export class ProjectModel {
             Logger.info(
                 `Duplicating ${savedSQLs.length} SQL queries on ${previewProjectUuid}`,
             );
-            type CloneSavedSQL = InsertSql;
+            type CloneSavedSQL = InsertSql & {
+                saved_sql_uuid?: string;
+                search_vector?: string;
+            };
 
             const newSavedSQLs =
                 savedSQLs.length > 0
@@ -1359,8 +1366,12 @@ export class ProjectModel {
                                   const createSavedSQL: CloneSavedSQL = {
                                       ...d,
                                       space_uuid: getNewSpaceUuid(d.space_uuid),
+                                      search_vector: undefined,
+                                      saved_sql_uuid: undefined,
                                       dashboard_uuid: null,
                                   };
+                                  delete createSavedSQL.search_vector;
+                                  delete createSavedSQL.saved_sql_uuid;
                                   return createSavedSQL;
                               }),
                           )
@@ -1378,7 +1389,7 @@ export class ProjectModel {
                     'dashboards.space_uuid',
                     'spaces.space_uuid',
                 )
-                .where('spaces.project_uuid', projectId)
+                .where('spaces.project_uuid', projectUuid)
                 .andWhere('saved_sql.space_uuid', null)
                 .select<DbSavedSql[]>('saved_sql.*');
 
@@ -1399,8 +1410,12 @@ export class ProjectModel {
                                   const createSavedSQL: CloneSavedSQL = {
                                       ...d,
                                       dashboard_uuid: d.dashboard_uuid,
+                                      search_vector: undefined,
+                                      saved_sql_uuid: undefined,
                                       space_uuid: null,
                                   };
+                                  delete createSavedSQL.search_vector;
+                                  delete createSavedSQL.saved_sql_uuid;
                                   return createSavedSQL;
                               }),
                           )
@@ -1442,6 +1457,105 @@ export class ProjectModel {
                 (d) => d.saved_sql_version_uuid,
             );
 
+            const newSavedSQLVersions =
+                savedSQLVersions.length > 0
+                    ? await trx('saved_sql_versions')
+                          .insert(
+                              savedSQLVersions.map((d) => {
+                                  const newSavedSQLUuid = savedSQLsMapping.find(
+                                      (m) => m.uuid === d.saved_sql_uuid,
+                                  )?.newUuid;
+                                  if (!newSavedSQLUuid) {
+                                      throw new Error(
+                                          `Cannot find new saved SQL uuid for ${d.saved_sql_uuid}`,
+                                      );
+                                  }
+                                  const createSavedSQLVersion = {
+                                      ...d,
+                                      saved_sql_version_uuid: undefined,
+                                      saved_sql_uuid: newSavedSQLUuid,
+                                  };
+                                  delete createSavedSQLVersion.saved_sql_version_uuid;
+                                  return createSavedSQLVersion;
+                              }),
+                          )
+                          .returning('*')
+                    : [];
+
+            const savedSQLVersionMapping = savedSQLVersions.map((c, i) => ({
+                uuid: c.saved_sql_version_uuid,
+                newUuid: newSavedSQLVersions[i].saved_sql_version_uuid,
+            }));
+
+            const copySavedSQLVersionContent = async (
+                table: string,
+                excludedFields: string[],
+                fieldPreprocess: { [field: string]: (value: any) => any } = {},
+            ) => {
+                const content = await trx(table)
+                    .whereIn('saved_sql_version_uuid', savedSQLVersionUuids)
+                    .select(`*`);
+
+                if (content.length === 0) return undefined;
+
+                const newContent = await trx(table)
+                    .insert(
+                        content.map((d) => {
+                            const createContent = {
+                                ...d,
+                                saved_sql_version_uuid:
+                                    savedSQLVersionMapping.find(
+                                        (m) =>
+                                            m.uuid === d.saved_sql_version_uuid,
+                                    )?.newUuid,
+                            };
+                            excludedFields.forEach((fieldUuid) => {
+                                delete createContent[fieldUuid];
+                            });
+                            Object.keys(fieldPreprocess).forEach(
+                                (fieldUuid) => {
+                                    createContent[fieldUuid] = fieldPreprocess[
+                                        fieldUuid
+                                    ](createContent[fieldUuid]);
+                                },
+                            );
+                            return createContent;
+                        }),
+                    )
+                    .returning('*');
+
+                return newContent;
+            };
+
+            await copySavedSQLVersionContent(
+                'saved_queries_version_table_calculations',
+                ['saved_queries_version_table_calculation_id'],
+            );
+            await copySavedSQLVersionContent(
+                'saved_queries_version_custom_dimensions',
+                ['saved_queries_version_custom_dimension_id'],
+                { custom_range: (value: any) => JSON.stringify(value) },
+            );
+            await copySavedSQLVersionContent(
+                SavedChartCustomSqlDimensionsTableName,
+                [],
+            );
+            await copySavedSQLVersionContent('saved_queries_version_sorts', [
+                'saved_queries_version_sort_id',
+            ]);
+            await copySavedSQLVersionContent('saved_queries_version_fields', [
+                'saved_queries_version_field_id',
+            ]);
+            await copySavedSQLVersionContent(
+                'saved_queries_version_additional_metrics',
+                ['saved_queries_version_additional_metric_id', 'uuid'],
+                { filters: (value: any) => JSON.stringify(value) },
+            );
+
+            //  dP""b8 88  88    db    88""Yb 888888 .dP"Y8
+            // dP   `" 88  88   dPYb   88__dP   88   `Ybo."
+            // Yb      888888  dP__Yb  88"Yb    88   o.`Y8b
+            //  YboodP 88  88 dP""""Yb 88  Yb   88   8bodP'
             const charts = await trx('saved_queries')
                 .leftJoin('spaces', 'saved_queries.space_id', 'spaces.space_id')
                 .whereIn('saved_queries.space_id', spaceIds)
@@ -1654,6 +1768,10 @@ export class ProjectModel {
                 { filters: (value: any) => JSON.stringify(value) },
             );
 
+            // 8888b.     db    .dP"Y8 88  88 88""Yb  dP"Yb     db    88""Yb 8888b.  .dP"Y8
+            //  8I  Yb   dPYb   `Ybo." 88  88 88__dP dP   Yb   dPYb   88__dP  8I  Yb `Ybo."
+            //  8I  dY  dP__Yb  o.`Y8b 888888 88""Yb Yb   dP  dP__Yb  88"Yb   8I  dY o.`Y8b
+            // 8888Y"  dP""""Yb 8bodP' 88  88 88oodP  YbodP  dP""""Yb 88  Yb 8888Y"  8bodP'
             const dashboards = await trx('dashboards')
                 .leftJoin('spaces', 'dashboards.space_id', 'spaces.space_id')
                 .whereIn('dashboards.space_id', spaceIds)
