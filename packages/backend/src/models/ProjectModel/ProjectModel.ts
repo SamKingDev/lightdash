@@ -1448,13 +1448,13 @@ export class ProjectModel {
 
             // Create a mapping of the old saved SQLs to the new saved SQLs
             const savedSQLInSpacesMapping = savedSQLs.map((c, i) => ({
-                uuid: c.saved_sql_uuid,
-                newUuid: newSavedSQLs[i].saved_sql_uuid,
+                id: c.saved_sql_uuid,
+                newId: newSavedSQLs[i].saved_sql_uuid,
             }));
             const savedSQLInDashboardsMapping = savedSQLInDashboards.map(
                 (c, i) => ({
-                    uuid: c.saved_sql_uuid,
-                    newUuid: newSavedSQLInDashboards[i].saved_sql_uuid,
+                    id: c.saved_sql_uuid,
+                    newId: newSavedSQLInDashboards[i].saved_sql_uuid,
                 }),
             );
             const savedSQLMapping = [
@@ -1462,7 +1462,7 @@ export class ProjectModel {
                 ...savedSQLInDashboardsMapping,
             ];
 
-            const savedSQLUuids = savedSQLMapping.map((c) => c.uuid);
+            const savedSQLUuids = savedSQLMapping.map((c) => c.id);
 
             // Get the last saved SQL version by uuid and created_at
             const lastSavedSQLVersionEntries = await trx('saved_sql_versions')
@@ -1479,18 +1479,14 @@ export class ProjectModel {
                 )
                 .select('*');
 
-            // const savedSQLVersionUuids = savedSQLVersions.map(
-            //     (d) => d.saved_sql_version_uuid,
-            // );
-
             const newSavedSQLVersions =
                 savedSQLVersions.length > 0
                     ? await trx('saved_sql_versions')
                           .insert(
                               savedSQLVersions.map((d) => {
                                   const newSavedSQLUuid = savedSQLMapping.find(
-                                      (m) => m.uuid === d.saved_sql_uuid,
-                                  )?.newUuid;
+                                      (m) => m.id === d.saved_sql_uuid,
+                                  )?.newId;
                                   if (!newSavedSQLUuid) {
                                       throw new Error(
                                           `Cannot find new saved SQL uuid for ${d.saved_sql_uuid}`,
@@ -1509,49 +1505,9 @@ export class ProjectModel {
                     : [];
 
             const savedSQLVersionMapping = savedSQLVersions.map((c, i) => ({
-                uuid: c.saved_sql_version_uuid,
-                newUuid: newSavedSQLVersions[i].saved_sql_version_uuid,
+                id: c.saved_sql_version_uuid,
+                newId: newSavedSQLVersions[i].saved_sql_version_uuid,
             }));
-
-            // const copySavedSQLVersionContent = async (
-            //     table: string,
-            //     excludedFields: string[],
-            //     fieldPreprocess: { [field: string]: (value: any) => any } = {},
-            // ) => {
-            //     const content = await trx(table)
-            //         .whereIn('saved_sql_version_uuid', savedSQLVersionUuids)
-            //         .select(`*`);
-
-            //     if (content.length === 0) return undefined;
-
-            //     const newContent = await trx(table)
-            //         .insert(
-            //             content.map((d) => {
-            //                 const createContent = {
-            //                     ...d,
-            //                     saved_sql_version_uuid:
-            //                         savedSQLVersionMapping.find(
-            //                             (m) =>
-            //                                 m.uuid === d.saved_sql_version_uuid,
-            //                         )?.newUuid,
-            //                 };
-            //                 excludedFields.forEach((fieldUuid) => {
-            //                     delete createContent[fieldUuid];
-            //                 });
-            //                 Object.keys(fieldPreprocess).forEach(
-            //                     (fieldUuid) => {
-            //                         createContent[fieldUuid] = fieldPreprocess[
-            //                             fieldUuid
-            //                         ](createContent[fieldUuid]);
-            //                     },
-            //                 );
-            //                 return createContent;
-            //             }),
-            //         )
-            //         .returning('*');
-
-            //     return newContent;
-            // };
 
             //  dP""b8 88  88    db    88""Yb 888888 .dP"Y8
             // dP   `" 88  88   dPYb   88__dP   88   `Ybo."
@@ -1952,6 +1908,29 @@ export class ProjectModel {
             );
             await Promise.all(updateChartInDashboards);
 
+            // update saved_sqls in dashboards
+            const updateSavedSQLInDashboards = newSavedSQLInDashboards.map(
+                (chart) => {
+                    const newDashboardUuid = dashboardMapping.find(
+                        (m) => m.uuid === chart.dashboard_uuid,
+                    )?.newUuid;
+
+                    if (!newDashboardUuid) {
+                        // The dashboard was not copied, perhaps becuase it belongs to a space the user doesn't have access to
+                        // We delete this chart in dashboard
+                        return trx('saved_sql')
+                            .where('saved_sql_uuid', chart.saved_sql_uuid)
+                            .delete();
+                    }
+                    return trx('saved_sql')
+                        .update({
+                            dashboard_uuid: newDashboardUuid,
+                        })
+                        .where('saved_sql_uuid', chart.saved_sql_uuid);
+                },
+            );
+            await Promise.all(updateSavedSQLInDashboards);
+
             const newDashboardTiles =
                 dashboardTiles.length > 0
                     ? await trx('dashboard_tiles')
@@ -1998,6 +1977,13 @@ export class ProjectModel {
                             )?.newId,
                         }),
 
+                        // only applied to saved sql tiles
+                        ...(d.saved_sql_uuid && {
+                            saved_sql_uuid: savedSQLMapping.find(
+                                (c) => c.id === d.saved_sql_uuid,
+                            )?.newId,
+                        }),
+
                         dashboard_version_id: dashboardVersionsMapping.find(
                             (m) => m.id === d.dashboard_version_id,
                         )?.newId!,
@@ -2012,6 +1998,7 @@ export class ProjectModel {
             await copyDashboardTileContent('dashboard_tile_charts');
             await copyDashboardTileContent('dashboard_tile_looms');
             await copyDashboardTileContent('dashboard_tile_markdowns');
+            await copyDashboardTileContent('dashboard_tile_sql_charts');
 
             const contentMapping: PreviewContentMapping = {
                 charts: chartMapping,
@@ -2019,7 +2006,8 @@ export class ProjectModel {
                 spaces: spaceMapping,
                 dashboards: dashboardMapping,
                 dashboardVersions: dashboardVersionsMapping,
-                // savedSql: savedSQLMapping,
+                savedSql: savedSQLMapping,
+                savedSqlVersions: savedSQLVersionMapping,
             };
             // Insert mapping on database
             await trx('preview_content').insert({
